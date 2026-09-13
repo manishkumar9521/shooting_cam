@@ -1,9 +1,11 @@
 #include <stdio.h>
+#include <string.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "esp_event.h"
+#include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
@@ -11,10 +13,14 @@
 
 static const char *TAG = "SHOOTING_CAM";
 
-#define WIFI_SSID       "Manish ShootingCam_AP"
+#define WIFI_SSID       "ShootingCam_AP"
 #define WIFI_PASSWORD   "12345678"
 #define WIFI_MAX_CONN   4
 
+
+// ============================================================
+// Wi-Fi event handler
+// ============================================================
 
 static void wifi_event_handler(
     void *arg,
@@ -22,60 +28,65 @@ static void wifi_event_handler(
     int32_t event_id,
     void *event_data)
 {
-    if (event_base == WIFI_EVENT) {
+    if (event_base != WIFI_EVENT) {
+        return;
+    }
 
-        switch (event_id) {
+    switch (event_id) {
 
-            case WIFI_EVENT_AP_START:
-                ESP_LOGI(TAG, "Wi-Fi AP started");
-                ESP_LOGI(TAG, "SSID: %s", WIFI_SSID);
-                ESP_LOGI(TAG, "IP address: 192.168.4.1");
-                break;
+        case WIFI_EVENT_AP_START:
+            ESP_LOGI(TAG, "Wi-Fi AP started");
+            ESP_LOGI(TAG, "SSID: %s", WIFI_SSID);
+            ESP_LOGI(TAG, "IP address: 192.168.4.1");
+            break;
 
-            case WIFI_EVENT_AP_STACONNECTED:
-            {
-                wifi_event_ap_staconnected_t *event =
-                    (wifi_event_ap_staconnected_t *)event_data;
+        case WIFI_EVENT_AP_STACONNECTED:
+        {
+            wifi_event_ap_staconnected_t *event =
+                (wifi_event_ap_staconnected_t *)event_data;
 
-                ESP_LOGI(
-                    TAG,
-                    "Phone connected - MAC: %02x:%02x:%02x:%02x:%02x:%02x",
-                    event->mac[0],
-                    event->mac[1],
-                    event->mac[2],
-                    event->mac[3],
-                    event->mac[4],
-                    event->mac[5]
-                );
+            ESP_LOGI(
+                TAG,
+                "Station connected - MAC: %02x:%02x:%02x:%02x:%02x:%02x",
+                event->mac[0],
+                event->mac[1],
+                event->mac[2],
+                event->mac[3],
+                event->mac[4],
+                event->mac[5]
+            );
 
-                break;
-            }
-
-            case WIFI_EVENT_AP_STADISCONNECTED:
-            {
-                wifi_event_ap_stadisconnected_t *event =
-                    (wifi_event_ap_stadisconnected_t *)event_data;
-
-                ESP_LOGI(
-                    TAG,
-                    "Phone disconnected - MAC: %02x:%02x:%02x:%02x:%02x:%02x",
-                    event->mac[0],
-                    event->mac[1],
-                    event->mac[2],
-                    event->mac[3],
-                    event->mac[4],
-                    event->mac[5]
-                );
-
-                break;
-            }
-
-            default:
-                break;
+            break;
         }
+
+        case WIFI_EVENT_AP_STADISCONNECTED:
+        {
+            wifi_event_ap_stadisconnected_t *event =
+                (wifi_event_ap_stadisconnected_t *)event_data;
+
+            ESP_LOGI(
+                TAG,
+                "Station disconnected - MAC: %02x:%02x:%02x:%02x:%02x:%02x",
+                event->mac[0],
+                event->mac[1],
+                event->mac[2],
+                event->mac[3],
+                event->mac[4],
+                event->mac[5]
+            );
+
+            break;
+        }
+
+        default:
+            break;
     }
 }
 
+
+// ============================================================
+// Wi-Fi SoftAP initialization
+// ============================================================
 
 static void wifi_init_softap(void)
 {
@@ -128,26 +139,133 @@ static void wifi_init_softap(void)
 }
 
 
+// ============================================================
+// HTTP GET / handler
+// ============================================================
+
+static esp_err_t root_get_handler(
+    httpd_req_t *req)
+{
+    const char *response =
+        "<!DOCTYPE html>"
+        "<html>"
+        "<head>"
+        "<meta charset=\"UTF-8\">"
+        "<title>Shooting Camera</title>"
+        "</head>"
+        "<body>"
+        "<h1>Hello from ESP32-S3!</h1>"
+        "<p>HTTP server is working.</p>"
+        "<p>IP: 192.168.4.1</p>"
+        "</body>"
+        "</html>";
+
+    httpd_resp_set_type(req, "text/html");
+
+    return httpd_resp_send(
+        req,
+        response,
+        HTTPD_RESP_USE_STRLEN
+    );
+}
+
+
+// ============================================================
+// HTTP server
+// ============================================================
+
+static httpd_handle_t start_webserver(void)
+{
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+
+    httpd_handle_t server = NULL;
+
+    ESP_LOGI(TAG, "Starting HTTP server...");
+
+    esp_err_t ret = httpd_start(
+        &server,
+        &config
+    );
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(
+            TAG,
+            "Failed to start HTTP server: %s",
+            esp_err_to_name(ret)
+        );
+
+        return NULL;
+    }
+
+    httpd_uri_t root_uri = {
+        .uri       = "/",
+        .method    = HTTP_GET,
+        .handler   = root_get_handler,
+        .user_ctx  = NULL
+    };
+
+    ret = httpd_register_uri_handler(
+        server,
+        &root_uri
+    );
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(
+            TAG,
+            "Failed to register / handler: %s",
+            esp_err_to_name(ret)
+        );
+
+        httpd_stop(server);
+
+        return NULL;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "HTTP server started successfully"
+    );
+
+    ESP_LOGI(
+        TAG,
+        "Open http://192.168.4.1 in your phone browser"
+    );
+
+    return server;
+}
+
+
+// ============================================================
+// Application entry point
+// ============================================================
+
 void app_main(void)
 {
-    ESP_LOGI(TAG, "=================================");
-    ESP_LOGI(TAG, " Shooting Target Camera");
-    ESP_LOGI(TAG, " ESP32-S3 Starting...");
-    ESP_LOGI(TAG, "=================================");
+    ESP_LOGI(TAG, "====================================");
+    ESP_LOGI(TAG, "     Shooting Target Camera");
+    ESP_LOGI(TAG, "     ESP32-S3 + HTTP Server");
+    ESP_LOGI(TAG, "====================================");
 
+    // Initialize NVS
     esp_err_t ret = nvs_flash_init();
 
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
         ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
 
         ESP_ERROR_CHECK(nvs_flash_erase());
+
         ret = nvs_flash_init();
     }
 
     ESP_ERROR_CHECK(ret);
 
+    // Start Wi-Fi AP
     wifi_init_softap();
 
+    // Start HTTP server
+    start_webserver();
+
+    // Keep application running
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
