@@ -140,23 +140,24 @@ static void wifi_init_softap(void)
 
 
 // ============================================================
-// HTTP GET / handler
+// GET /
 // ============================================================
 
-static esp_err_t root_get_handler(
-    httpd_req_t *req)
+static esp_err_t root_get_handler(httpd_req_t *req)
 {
     const char *response =
         "<!DOCTYPE html>"
         "<html>"
         "<head>"
         "<meta charset=\"UTF-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         "<title>Shooting Camera</title>"
         "</head>"
         "<body>"
-        "<h1>Hello from ESP32-S3!</h1>"
-        "<p>HTTP server is working.</p>"
-        "<p>IP: 192.168.4.1</p>"
+        "<h1>ESP32-S3 Shooting Camera</h1>"
+        "<p>HTTP server is running.</p>"
+        "<p><a href=\"/status\">Device Status</a></p>"
+        "<p><a href=\"/capture\">Capture Test</a></p>"
         "</body>"
         "</html>";
 
@@ -171,7 +172,58 @@ static esp_err_t root_get_handler(
 
 
 // ============================================================
-// HTTP server
+// GET /status
+// ============================================================
+
+static esp_err_t status_get_handler(httpd_req_t *req)
+{
+    const char *response =
+        "{"
+        "\"device\":\"ESP32-S3\","
+        "\"project\":\"Shooting Target Camera\","
+        "\"wifi\":\"AP\","
+        "\"ip\":\"192.168.4.1\","
+        "\"camera\":\"not_initialized\""
+        "}";
+
+    httpd_resp_set_type(req, "application/json");
+
+    return httpd_resp_send(
+        req,
+        response,
+        HTTPD_RESP_USE_STRLEN
+    );
+}
+
+
+// ============================================================
+// GET /capture
+//
+// Temporary implementation.
+// Camera will be added in Phase 2.
+// ============================================================
+
+static esp_err_t capture_get_handler(httpd_req_t *req)
+{
+    const char *response =
+        "{"
+        "\"success\":false,"
+        "\"message\":\"Camera not initialized\","
+        "\"next_phase\":\"OV5640 initialization\""
+        "}";
+
+    httpd_resp_set_type(req, "application/json");
+
+    return httpd_resp_send(
+        req,
+        response,
+        HTTPD_RESP_USE_STRLEN
+    );
+}
+
+
+// ============================================================
+// Start HTTP server
 // ============================================================
 
 static httpd_handle_t start_webserver(void)
@@ -188,6 +240,7 @@ static httpd_handle_t start_webserver(void)
     );
 
     if (ret != ESP_OK) {
+
         ESP_LOGE(
             TAG,
             "Failed to start HTTP server: %s",
@@ -197,43 +250,86 @@ static httpd_handle_t start_webserver(void)
         return NULL;
     }
 
+
+    // --------------------------------------------------------
+    // /
+    // --------------------------------------------------------
+
     httpd_uri_t root_uri = {
-        .uri       = "/",
-        .method    = HTTP_GET,
-        .handler   = root_get_handler,
-        .user_ctx  = NULL
+        .uri      = "/",
+        .method   = HTTP_GET,
+        .handler  = root_get_handler,
+        .user_ctx = NULL
     };
 
-    ret = httpd_register_uri_handler(
-        server,
-        &root_uri
+    ESP_ERROR_CHECK(
+        httpd_register_uri_handler(
+            server,
+            &root_uri
+        )
     );
 
-    if (ret != ESP_OK) {
-        ESP_LOGE(
-            TAG,
-            "Failed to register / handler: %s",
-            esp_err_to_name(ret)
-        );
 
-        httpd_stop(server);
+    // --------------------------------------------------------
+    // /status
+    // --------------------------------------------------------
 
-        return NULL;
-    }
+    httpd_uri_t status_uri = {
+        .uri      = "/status",
+        .method   = HTTP_GET,
+        .handler  = status_get_handler,
+        .user_ctx = NULL
+    };
+
+    ESP_ERROR_CHECK(
+        httpd_register_uri_handler(
+            server,
+            &status_uri
+        )
+    );
+
+
+    // --------------------------------------------------------
+    // /capture
+    // --------------------------------------------------------
+
+    httpd_uri_t capture_uri = {
+        .uri      = "/capture",
+        .method   = HTTP_GET,
+        .handler  = capture_get_handler,
+        .user_ctx = NULL
+    };
+
+    ESP_ERROR_CHECK(
+        httpd_register_uri_handler(
+            server,
+            &capture_uri
+        )
+    );
+
 
     ESP_LOGI(
         TAG,
-        "HTTP server started successfully"
+        "HTTP server started"
     );
 
     ESP_LOGI(
         TAG,
-        "Open http://192.168.4.1 in your phone browser"
+        "GET  /"
+    );
+
+    ESP_LOGI(
+        TAG,
+        "GET  /status"
+    );
+
+    ESP_LOGI(
+        TAG,
+        "GET  /capture"
     );
 
     return server;
 }
-
 
 // ============================================================
 // Application entry point
