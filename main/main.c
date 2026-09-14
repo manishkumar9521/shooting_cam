@@ -4,6 +4,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "esp_camera.h"
+#include <stdbool.h>
 #include "esp_event.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -17,6 +19,125 @@ static const char *TAG = "SHOOTING_CAM";
 #define WIFI_PASSWORD   "12345678"
 #define WIFI_MAX_CONN   4
 
+// Camera configuration
+static esp_err_t camera_init(void)
+{
+    camera_config_t config = {
+        .pin_pwdn     = -1,
+        .pin_reset    = -1,
+
+        .pin_xclk     = 38,
+
+        .pin_sccb_sda = 8,
+        .pin_sccb_scl = 7,
+
+        .pin_d7       = 21,
+        .pin_d6       = 39,
+        .pin_d5       = 40,
+        .pin_d4       = 42,
+        .pin_d3       = 46,
+        .pin_d2       = 48,
+        .pin_d1       = 47,
+        .pin_d0       = 45,
+
+        .pin_vsync    = 17,
+        .pin_href     = 18,
+        .pin_pclk     = 41,
+
+        .xclk_freq_hz = 20000000,
+
+        .ledc_timer   = LEDC_TIMER_0,
+        .ledc_channel = LEDC_CHANNEL_0,
+
+        .pixel_format = PIXFORMAT_JPEG,
+
+        .frame_size   = FRAMESIZE_VGA,
+
+        .jpeg_quality = 10,
+
+        .fb_count     = 2,
+
+        .fb_location  = CAMERA_FB_IN_PSRAM,
+
+        .grab_mode    = CAMERA_GRAB_LATEST,
+    };
+
+    ESP_LOGI(TAG, "Initializing OV5640 camera...");
+
+    esp_err_t err = esp_camera_init(&config);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(
+            TAG,
+            "Camera initialization failed: 0x%x",
+            err
+        );
+
+        return err;
+    }
+
+    ESP_LOGI(TAG, "OV5640 camera initialized successfully");
+
+    return ESP_OK;
+}
+
+// Camera capture
+static esp_err_t camera_capture_test(void)
+{
+    ESP_LOGI(TAG, "Capturing image...");
+
+    camera_fb_t *fb = esp_camera_fb_get();
+
+    if (fb == NULL) {
+        ESP_LOGE(TAG, "Camera capture failed");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Capture successful!");
+    ESP_LOGI(TAG, "Width      : %u", fb->width);
+    ESP_LOGI(TAG, "Height     : %u", fb->height);
+    ESP_LOGI(TAG, "Format     : %d", fb->format);
+    ESP_LOGI(TAG, "Image size : %u bytes", (unsigned)fb->len);
+
+    if (fb->format == PIXFORMAT_JPEG && fb->len >= 4) {
+
+        bool jpeg_start =
+            (fb->buf[0] == 0xFF &&
+             fb->buf[1] == 0xD8);
+
+        bool jpeg_end =
+            (fb->buf[fb->len - 2] == 0xFF &&
+             fb->buf[fb->len - 1] == 0xD9);
+
+        ESP_LOGI(
+            TAG,
+            "JPEG start marker: %s",
+            jpeg_start ? "OK" : "INVALID"
+        );
+
+        ESP_LOGI(
+            TAG,
+            "JPEG end marker: %s",
+            jpeg_end ? "OK" : "INVALID"
+        );
+
+        if (!jpeg_start || !jpeg_end) {
+            ESP_LOGE(TAG, "JPEG validation failed");
+
+            esp_camera_fb_return(fb);
+
+            return ESP_FAIL;
+        }
+
+        ESP_LOGI(TAG, "JPEG validation successful!");
+    }
+
+    esp_camera_fb_return(fb);
+
+    ESP_LOGI(TAG, "Frame buffer returned");
+
+    return ESP_OK;
+}
 
 // ============================================================
 // Wi-Fi event handler
@@ -83,6 +204,64 @@ static void wifi_event_handler(
     }
 }
 
+// Capture Handler
+static esp_err_t capture_handler(httpd_req_t *req)
+{
+    ESP_LOGI(TAG, "GET /capture");
+
+    camera_fb_t *fb = esp_camera_fb_get();
+
+    if (fb == NULL) {
+        ESP_LOGE(TAG, "Camera capture failed");
+
+        httpd_resp_send_err(
+            req,
+            HTTPD_500_INTERNAL_SERVER_ERROR,
+            "Camera capture failed"
+        );
+
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "Captured image: %ux%u, %u bytes",
+        fb->width,
+        fb->height,
+        (unsigned)fb->len
+    );
+
+    // Tell browser that this is a JPEG image
+    httpd_resp_set_type(req, "image/jpeg");
+
+    // Prevent caching so every request captures a fresh image
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+
+    // Send JPEG
+    esp_err_t ret = httpd_resp_send(
+        req,
+        (const char *)fb->buf,
+        fb->len
+    );
+
+    // IMPORTANT:
+    // Return frame buffer only AFTER httpd_resp_send()
+    esp_camera_fb_return(fb);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(
+            TAG,
+            "Failed to send image: %s",
+            esp_err_to_name(ret)
+        );
+
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Image sent successfully");
+
+    return ESP_OK;
+}
 
 // ============================================================
 // Wi-Fi SoftAP initialization
@@ -294,11 +473,13 @@ static httpd_handle_t start_webserver(void)
     // --------------------------------------------------------
 
     httpd_uri_t capture_uri = {
-        .uri      = "/capture",
-        .method   = HTTP_GET,
-        .handler  = capture_get_handler,
-        .user_ctx = NULL
+        .uri       = "/capture",
+        .method    = HTTP_GET,
+        .handler   = capture_handler,
+        .user_ctx  = NULL
     };
+
+    // httpd_register_uri_handler(server, &capture_uri);
 
     ESP_ERROR_CHECK(
         httpd_register_uri_handler(
@@ -334,15 +515,13 @@ static httpd_handle_t start_webserver(void)
 // ============================================================
 // Application entry point
 // ============================================================
-
 void app_main(void)
 {
     ESP_LOGI(TAG, "====================================");
     ESP_LOGI(TAG, "     Shooting Target Camera");
-    ESP_LOGI(TAG, "     ESP32-S3 + HTTP Server");
+    ESP_LOGI(TAG, "     ESP32-S3 + OV5640");
     ESP_LOGI(TAG, "====================================");
 
-    // Initialize NVS
     esp_err_t ret = nvs_flash_init();
 
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
@@ -355,13 +534,39 @@ void app_main(void)
 
     ESP_ERROR_CHECK(ret);
 
-    // Start Wi-Fi AP
+    // ----------------------------
+    // Camera
+    // ----------------------------
+
+    ret = camera_init();
+
+    if (ret != ESP_OK) {
+
+        ESP_LOGE(TAG, "Camera initialization failed");
+
+    } else {
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        ret = camera_capture_test();
+
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Camera capture test failed");
+        }
+    }
+
+    // ----------------------------
+    // Wi-Fi
+    // ----------------------------
+
     wifi_init_softap();
 
-    // Start HTTP server
+    // ----------------------------
+    // HTTP server
+    // ----------------------------
+
     start_webserver();
 
-    // Keep application running
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
