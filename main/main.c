@@ -19,6 +19,24 @@ static const char *TAG = "SHOOTING_CAM";
 #define WIFI_PASSWORD   "12345678"
 #define WIFI_MAX_CONN   4
 
+// ============================================================
+// MJPEG stream configuration
+// ============================================================
+
+#define PART_BOUNDARY "123456789000000000000987654321"
+
+static const char *STREAM_CONTENT_TYPE =
+    "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
+
+static const char *STREAM_BOUNDARY =
+    "\r\n--" PART_BOUNDARY "\r\n";
+
+static const char *STREAM_PART =
+    "Content-Type: image/jpeg\r\n"
+    "Content-Length: %zu\r\n"
+    "\r\n";
+
+
 // Camera configuration
 static esp_err_t camera_init(void)
 {
@@ -137,6 +155,150 @@ static esp_err_t camera_capture_test(void)
     ESP_LOGI(TAG, "Frame buffer returned");
 
     return ESP_OK;
+}
+
+// ============================================================
+// MJPEG video stream handler
+// ============================================================
+
+static esp_err_t stream_handler(httpd_req_t *req)
+{
+    ESP_LOGI(TAG, "GET /stream");
+
+    esp_err_t res = httpd_resp_set_type(
+        req,
+        STREAM_CONTENT_TYPE
+    );
+
+    if (res != ESP_OK) {
+        return res;
+    }
+
+    httpd_resp_set_hdr(
+        req,
+        "Cache-Control",
+        "no-cache"
+    );
+
+    httpd_resp_set_hdr(
+        req,
+        "Access-Control-Allow-Origin",
+        "*"
+    );
+
+    while (true) {
+
+        // ----------------------------------------------------
+        // Capture frame
+        // ----------------------------------------------------
+
+        camera_fb_t *fb = esp_camera_fb_get();
+
+        if (fb == NULL) {
+
+            ESP_LOGE(
+                TAG,
+                "Camera capture failed during stream"
+            );
+
+            res = ESP_FAIL;
+            break;
+        }
+
+        size_t jpg_len = fb->len;
+        uint8_t *jpg_buf = fb->buf;
+
+        // Save values before returning framebuffer
+        uint16_t width = fb->width;
+        uint16_t height = fb->height;
+
+        // ----------------------------------------------------
+        // Send MJPEG boundary
+        // ----------------------------------------------------
+
+        res = httpd_resp_send_chunk(
+            req,
+            STREAM_BOUNDARY,
+            strlen(STREAM_BOUNDARY)
+        );
+
+        if (res != ESP_OK) {
+            esp_camera_fb_return(fb);
+            break;
+        }
+
+        // ----------------------------------------------------
+        // Send JPEG headers
+        // ----------------------------------------------------
+
+        char part_buf[128];
+
+        int hlen = snprintf(
+            part_buf,
+            sizeof(part_buf),
+            STREAM_PART,
+            jpg_len
+        );
+
+        if (hlen <= 0 || hlen >= sizeof(part_buf)) {
+
+            ESP_LOGE(
+                TAG,
+                "Failed to create JPEG header"
+            );
+
+            esp_camera_fb_return(fb);
+            res = ESP_FAIL;
+            break;
+        }
+
+        res = httpd_resp_send_chunk(
+            req,
+            part_buf,
+            hlen
+        );
+
+        if (res != ESP_OK) {
+            esp_camera_fb_return(fb);
+            break;
+        }
+
+        // ----------------------------------------------------
+        // Send JPEG
+        // ----------------------------------------------------
+
+        res = httpd_resp_send_chunk(
+            req,
+            (const char *)jpg_buf,
+            jpg_len
+        );
+
+        // ----------------------------------------------------
+        // Return framebuffer
+        // ----------------------------------------------------
+
+        esp_camera_fb_return(fb);
+
+        if (res != ESP_OK) {
+
+            ESP_LOGI(
+                TAG,
+                "Stream client disconnected"
+            );
+
+            break;
+        }
+
+        ESP_LOGI(
+            TAG,
+            "Stream frame sent: %ux%u, %u bytes",
+            width,
+            height,
+            (unsigned)jpg_len
+        );
+    }
+
+    return res;
 }
 
 // ============================================================
@@ -337,6 +499,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "<p>HTTP server is running.</p>"
         "<p><a href=\"/status\">Device Status</a></p>"
         "<p><a href=\"/capture\">Capture Test</a></p>"
+        "<p><a href=\"/stream\">Video Stream Test</a></p>"
         "</body>"
         "</html>";
 
@@ -363,32 +526,6 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"wifi\":\"AP\","
         "\"ip\":\"192.168.4.1\","
         "\"camera\":\"not_initialized\""
-        "}";
-
-    httpd_resp_set_type(req, "application/json");
-
-    return httpd_resp_send(
-        req,
-        response,
-        HTTPD_RESP_USE_STRLEN
-    );
-}
-
-
-// ============================================================
-// GET /capture
-//
-// Temporary implementation.
-// Camera will be added in Phase 2.
-// ============================================================
-
-static esp_err_t capture_get_handler(httpd_req_t *req)
-{
-    const char *response =
-        "{"
-        "\"success\":false,"
-        "\"message\":\"Camera not initialized\","
-        "\"next_phase\":\"OV5640 initialization\""
         "}";
 
     httpd_resp_set_type(req, "application/json");
@@ -467,6 +604,23 @@ static httpd_handle_t start_webserver(void)
         )
     );
 
+    // --------------------------------------------------------
+    // /stream
+    // --------------------------------------------------------
+
+    httpd_uri_t stream_uri = {
+        .uri       = "/stream",
+        .method    = HTTP_GET,
+        .handler   = stream_handler,
+        .user_ctx  = NULL
+    };
+
+    ESP_ERROR_CHECK(
+        httpd_register_uri_handler(
+            server,
+            &stream_uri
+        )
+    );
 
     // --------------------------------------------------------
     // /capture
@@ -508,6 +662,8 @@ static httpd_handle_t start_webserver(void)
         TAG,
         "GET  /capture"
     );
+
+    ESP_LOGI(TAG, "GET  /stream");
 
     return server;
 }
