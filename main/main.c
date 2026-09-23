@@ -72,7 +72,7 @@ static const char *INDEX_HTML =
     "</div>"
     "<div class=\"controls\">"
     "<button id=\"stream-btn\" onclick=\"startStream()\">Live Stream</button>"
-    "<button class=\"capture\" onclick=\"captureImage()\">High-Res Capture</button>"
+    "<button id=\"capture-btn\" class=\"capture\" onclick=\"captureImage()\">Capture &amp; Save</button>"
     "<button class=\"secondary\" onclick=\"stopFeed()\">Stop</button>"
     "<button class=\"secondary\" onclick=\"refreshStatus()\">Refresh Status</button>"
     "</div>"
@@ -88,17 +88,51 @@ static const char *INDEX_HTML =
     "const ph=document.getElementById('ph');"
     "const dot=document.getElementById('live-dot');"
     "const btn=document.getElementById('stream-btn');"
+    "const captureBtn=document.getElementById('capture-btn');"
+    "const statusBox=document.getElementById('status');"
     "let feed='';"
+    "let previewUrl='';"
     "function showImage(){img.style.display='block';ph.style.display='none';}"
+    "function cleanupPreviewUrl(){if(previewUrl){URL.revokeObjectURL(previewUrl);previewUrl='';}}"
     "function startStream(){"
     "stopFeed();feed='stream';img.src='/stream?ts='+Date.now();showImage();"
     "dot.classList.add('on');btn.textContent='Streaming...';btn.disabled=true;"
     "}"
-    "function captureImage(){"
-    "stopFeed();feed='capture';img.src='/capture?ts='+Date.now();showImage();"
+    "async function captureImage(){"
+    "stopFeed();"
+    "captureBtn.disabled=true;"
+    "captureBtn.textContent='Capturing...';"
+    "statusBox.textContent='Capturing UXGA image and preparing phone download...';"
+    "try{"
+    "const r=await fetch('/capture?ts='+Date.now(),{cache:'no-store'});"
+    "if(!r.ok)throw new Error('HTTP '+r.status);"
+    "const blob=await r.blob();"
+    "if(blob.size===0)throw new Error('Empty image received');"
+    "cleanupPreviewUrl();"
+    "previewUrl=URL.createObjectURL(blob);"
+    "feed='capture';img.src=previewUrl;showImage();"
+    "const now=new Date();"
+    "const pad=n=>String(n).padStart(2,'0');"
+    "const filename='shooting_capture_'+now.getFullYear()+pad(now.getMonth()+1)+pad(now.getDate())+'_'+pad(now.getHours())+pad(now.getMinutes())+pad(now.getSeconds())+'.jpg';"
+    "const a=document.createElement('a');"
+    "a.href=previewUrl;"
+    "a.download=filename;"
+    "a.style.display='none';"
+    "document.body.appendChild(a);"
+    "a.click();"
+    "a.remove();"
+    "statusBox.textContent='Capture ready. The browser download should now save '+filename+' to your phone.';"
+    "setTimeout(()=>{try{URL.revokeObjectURL(previewUrl);}catch(e){}},60000);"
+    "}catch(e){"
+    "statusBox.textContent='Capture/save error: '+e.message;"
+    "}finally{"
+    "captureBtn.disabled=false;"
+    "captureBtn.textContent='Capture & Save';"
+    "}"
     "}"
     "function stopFeed(){"
-    "if(feed){img.src='';feed='';}"
+    "if(feed==='stream'){img.src='';}"
+    "feed='';"
     "dot.classList.remove('on');btn.textContent='Live Stream';btn.disabled=false;"
     "}"
     "async function refreshStatus(){"
@@ -629,8 +663,11 @@ static esp_err_t capture_handler(httpd_req_t *req)
     ESP_LOGI(TAG, "Captured image: %ux%u, %u bytes", fb->width, fb->height, (unsigned)fb->len);
 
     httpd_resp_set_type(req, "image/jpeg");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"shooting_capture.jpg\"");
 
+    // A direct visit to /capture on the phone is also downloadable.
+    // The dashboard fetches this JPEG and triggers a timestamped download.
     esp_err_t ret = httpd_resp_send(req, (const char *)fb->buf, fb->len);
     esp_camera_fb_return(fb);
 
